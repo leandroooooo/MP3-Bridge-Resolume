@@ -77,7 +77,7 @@ VstIntPtr VSTCALLBACK dispatch(AEffect* effect, VstInt32 opcode, VstInt32, VstIn
     case effSetSampleRate: case effSetBlockSize: case effMainsChanged: return 1;
     case effEditGetRect:
         if (ptr) {
-            static ERect rect{0, kEditorHeight, 0, kEditorWidth};
+            static ERect rect{0, 0, kEditorHeight, kEditorWidth};
             *static_cast<ERect**>(ptr) = &rect;
             return 1;
         }
