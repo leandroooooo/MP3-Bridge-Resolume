@@ -24,7 +24,8 @@ struct AEffect {
     AEffectProcessProc processReplacing, processDoubleReplacing;
     char future[56];
 };
-struct ERect { int16_t top, bottom, left, right; };
+// VST2 ERect field order is top, left, bottom, right.
+struct ERect { int16_t top, left, bottom, right; };
 constexpr VstInt32 kEffectMagic = 0x56737450;
 constexpr VstInt32 effOpen = 0, effClose = 1;
 constexpr VstInt32 effSetSampleRate = 10, effSetBlockSize = 11, effMainsChanged = 12;
