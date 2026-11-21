@@ -1,0 +1,54 @@
+name: Build VST3 probe (Steinberg AGain)
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+    paths:
+      - ".github/workflows/build-vst3-probe.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build AGain VST3 examples (Windows x64)
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout VST3 SDK with submodules
+        uses: actions/checkout@v4
+        with:
+          repository: steinbergmedia/vst3sdk
+          submodules: recursive
+          path: vst3sdk
+
+      - name: Configure SDK
+        run: cmake -S vst3sdk -B build -A x64 -DSMTG_CREATE_PLUGIN_LINK=0
+
+      - name: Build AGain examples
+        run: cmake --build build --config Release --target again again-simple --parallel 2
+
+      - name: Collect VST3 bundles
+        shell: pwsh
+        run: |
+          $plugins = Get-ChildItem -Path build -Recurse -Directory -Filter "*.vst3"
+          if (-not $plugins) {
+            Write-Error "Nenhum bundle .vst3 foi encontrado após a compilação."
+            exit 1
+          }
+          New-Item -ItemType Directory -Force -Path artifacts | Out-Null
+          foreach ($plugin in $plugins) {
+            $zip = Join-Path "artifacts" ($plugin.Name + ".zip")
+            Compress-Archive -Path $plugin.FullName -DestinationPath $zip -Force
+            Write-Host "Artifact criado: $zip"
+          }
+
+      - name: Upload VST3 test plugins
+        uses: actions/upload-artifact@v4
+        with:
+          name: AGain-VST3-Windows-x64
+          path: artifacts/*.zip
+          if-no-files-found: error
+          retention-days: 14
