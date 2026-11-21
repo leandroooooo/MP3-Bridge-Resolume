@@ -6,8 +6,6 @@
 namespace {
 struct ProbeState {
     AEffect effect{};
-    audioMasterCallback host = nullptr;
-    float gain = 1.0f;
 };
 
 VstIntPtr VSTCALLBACK dispatch(AEffect* effect, VstInt32 opcode, VstInt32, VstIntPtr, void* ptr, float) {
@@ -44,30 +42,16 @@ VstIntPtr VSTCALLBACK dispatch(AEffect* effect, VstInt32 opcode, VstInt32, VstIn
     }
 }
 
-void VSTCALLBACK setParameter(AEffect* effect, VstInt32 index, float value) {
-    if (effect && index == 0) {
-        auto* state = static_cast<ProbeState*>(effect->object);
-        if (state) state->gain = std::clamp(value, 0.0f, 1.0f);
-    }
-}
-
-float VSTCALLBACK getParameter(AEffect* effect, VstInt32 index) {
-    if (!effect || index != 0) return 0.0f;
-    auto* state = static_cast<ProbeState*>(effect->object);
-    return state ? state->gain : 1.0f;
-}
-
-void VSTCALLBACK processReplacing(AEffect* effect, float** inputs, float** outputs, VstInt32 frames) {
-    auto* state = effect ? static_cast<ProbeState*>(effect->object) : nullptr;
-    const float gain = state ? state->gain : 1.0f;
+// Transparent stereo pass-through: the plugin does not change the clip audio.
+void VSTCALLBACK processReplacing(AEffect*, float** inputs, float** outputs, VstInt32 frames) {
     for (int channel = 0; channel < 2; ++channel) {
         if (!outputs || !outputs[channel]) continue;
-        const float* input = (inputs ? inputs[channel] : nullptr);
+        const float* input = inputs ? inputs[channel] : nullptr;
         if (!input) {
             std::fill(outputs[channel], outputs[channel] + frames, 0.0f);
-            continue;
+        } else {
+            std::copy(input, input + frames, outputs[channel]);
         }
-        for (VstInt32 i = 0; i < frames; ++i) outputs[channel][i] = input[i] * gain;
     }
 }
 }
@@ -77,15 +61,15 @@ extern "C" __declspec(dllexport) AEffect* VSTCALLBACK VSTPluginMain(audioMasterC
 
     auto* state = new (std::nothrow) ProbeState();
     if (!state) return nullptr;
-    state->host = host;
+
     auto& e = state->effect;
     e.magic = kEffectMagic;
     e.dispatcher = dispatch;
     e.process = nullptr;
-    e.setParameter = setParameter;
-    e.getParameter = getParameter;
+    e.setParameter = nullptr;
+    e.getParameter = nullptr;
     e.numPrograms = 1;
-    e.numParams = 1;
+    e.numParams = 0;
     e.numInputs = 2;
     e.numOutputs = 2;
     e.flags = effFlagsCanReplacing;
@@ -93,7 +77,7 @@ extern "C" __declspec(dllexport) AEffect* VSTCALLBACK VSTPluginMain(audioMasterC
     e.ioRatio = 1.0f;
     e.object = state;
     e.uniqueID = 0x4D503242; // 'MP2B'
-    e.version = 1000;
+    e.version = 1001;
     e.processReplacing = processReplacing;
     e.processDoubleReplacing = nullptr;
     return &e;
