@@ -11,6 +11,7 @@
 #include <cstdint>
 #include <cstring>
 #include <memory>
+#include <iterator>
 #include <mutex>
 #include <new>
 #include <vector>
@@ -169,7 +170,7 @@ LRESULT CALLBACK editorProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lPara
         OPENFILENAMEW dialog{};
         dialog.lStructSize = sizeof(dialog);
         dialog.hwndOwner = hwnd;
-        dialog.lpstrFilter = L"Áudio (*.mp3;*.wav)\\0*.mp3;*.wav\\0Todos (*.*)\\0*.*\\0";
+        dialog.lpstrFilter = L"Áudio (*.mp3;*.wav)\0*.mp3;*.wav\0Todos (*.*)\0*.*\0";
         dialog.lpstrFile = path;
         dialog.nMaxFile = MAX_PATH;
         dialog.Flags = OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST | OFN_HIDEREADONLY;
@@ -186,7 +187,7 @@ LRESULT CALLBACK editorProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lPara
                 std::atomic_store_explicit(&state->audio, std::move(decoded), std::memory_order_release);
                 state->playhead.store(0, std::memory_order_relaxed);
                 lstrcpynW(state->selectedFile, path, MAX_PATH);
-                const wchar_t* name = wcsrchr(path, L'\\\\');
+                const wchar_t* name = wcsrchr(path, L'\\');
                 SetWindowTextW(state->fileLabel, name ? name + 1 : path);
             } else {
                 const std::wstring error = L"Falha ao abrir áudio: " + describeError(hr);
