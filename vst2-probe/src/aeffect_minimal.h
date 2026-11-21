@@ -28,6 +28,8 @@ struct AEffect {
 struct ERect { int16_t top, left, bottom, right; };
 constexpr VstInt32 kEffectMagic = 0x56737450;
 constexpr VstInt32 effOpen = 0, effClose = 1;
+constexpr VstInt32 effGetParamLabel = 6, effGetParamDisplay = 7, effGetParamName = 8;
+constexpr VstInt32 effCanBeAutomated = 26;
 constexpr VstInt32 effSetSampleRate = 10, effSetBlockSize = 11, effMainsChanged = 12;
 constexpr VstInt32 effEditGetRect = 13, effEditOpen = 14, effEditClose = 15;
 constexpr VstInt32 effGetEffectName = 45, effGetVendorString = 47, effGetProductString = 48;
