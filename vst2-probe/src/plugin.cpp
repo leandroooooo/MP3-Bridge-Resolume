@@ -14,7 +14,7 @@ struct ProbeState {
     HWND editor = nullptr, fileLabel = nullptr, hostParent = nullptr;
     wchar_t selectedFile[MAX_PATH]{};
 };
-LRESULT CALLBACK editorProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM) {
+LRESULT CALLBACK editorProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam) {
     auto* state = reinterpret_cast<ProbeState*>(GetWindowLongPtrW(hwnd, GWLP_USERDATA));
     if (message == WM_COMMAND && LOWORD(wParam) == kOpenButtonId && state) {
         wchar_t path[MAX_PATH]{};
@@ -34,7 +34,7 @@ LRESULT CALLBACK editorProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM) {
         return 0;
     }
     if (message == WM_NCDESTROY) SetWindowLongPtrW(hwnd, GWLP_USERDATA, 0);
-    return DefWindowProcW(hwnd, message, 0, 0);
+    return DefWindowProcW(hwnd, message, wParam, lParam);
 }
 bool registerEditorClass() {
     static bool registered = false;
