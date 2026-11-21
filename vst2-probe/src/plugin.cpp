@@ -39,7 +39,6 @@ struct ProbeState {
     std::atomic<uint64_t> playbackGeneration{0};
     std::atomic<bool> playing{false};
     std::atomic<bool> hostWasPlaying{false};
-    std::atomic<double> lastHostSamplePos{-1.0};
     std::atomic<bool> loopEnabled{true};
     std::atomic<float> hostSampleRate{static_cast<float>(kFallbackSampleRate)};
 };
@@ -193,10 +192,8 @@ void syncHostTransport(ProbeState* state) {
     if (raw == 0) return;
     const auto* timeInfo = reinterpret_cast<const VstTimeInfo*>(raw);
     const bool hostPlaying = (timeInfo->flags & kVstTransportPlaying) != 0;
-    const double previousSamplePos = state->lastHostSamplePos.exchange(timeInfo->samplePos, std::memory_order_acq_rel);
-    const bool positionRestarted = previousSamplePos >= 0.0 && timeInfo->samplePos + 1.0 < previousSamplePos;
     const bool wasPlaying = state->hostWasPlaying.exchange(hostPlaying, std::memory_order_acq_rel);
-    if (hostPlaying && (!wasPlaying || positionRestarted)) {
+    if (hostPlaying && !wasPlaying) {
         state->playhead.store(0, std::memory_order_release);
         state->playing.store(true, std::memory_order_release);
         state->playbackGeneration.fetch_add(1, std::memory_order_acq_rel);
@@ -300,7 +297,6 @@ VstIntPtr VSTCALLBACK dispatch(AEffect* effect, VstInt32 opcode, VstInt32 index,
     case effMainsChanged:
         if (state && value == 0) {
             state->hostWasPlaying.store(false, std::memory_order_release);
-            state->lastHostSamplePos.store(-1.0, std::memory_order_release);
             stopPlayback(state);
         }
         return 1;
