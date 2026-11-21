@@ -210,8 +210,8 @@ void VSTCALLBACK setParameter(AEffect* effect, VstInt32 index, float value) {
         break;
     case kParamStop:
         state->playing.store(false, std::memory_order_release);
-        state->playbackGeneration.fetch_add(1, std::memory_order_acq_rel);
         state->playhead.store(0, std::memory_order_release);
+        state->playbackGeneration.fetch_add(1, std::memory_order_acq_rel);
         break;
     default:
         break;
@@ -250,13 +250,13 @@ LRESULT CALLBACK editorProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lPara
             std::shared_ptr<AudioBuffer> decoded;
             const HRESULT hr = decodeAudioFile(path, requestedRate, decoded);
             if (SUCCEEDED(hr)) {
-                state->playbackGeneration.fetch_add(1, std::memory_order_acq_rel);
                 std::atomic_store_explicit(&state->audio, std::move(decoded), std::memory_order_release);
                 state->playhead.store(0, std::memory_order_relaxed);
                 state->parameters[kParamPlay].store(0.0f, std::memory_order_relaxed);
                 state->parameters[kParamPause].store(0.0f, std::memory_order_relaxed);
                 state->parameters[kParamStop].store(0.0f, std::memory_order_relaxed);
                 state->playing.store(true, std::memory_order_release);
+                state->playbackGeneration.fetch_add(1, std::memory_order_acq_rel);
                 lstrcpynW(state->selectedFile, path, MAX_PATH);
                 const wchar_t* name = wcsrchr(path, L'\\');
                 SetWindowTextW(state->fileLabel, name ? name + 1 : path);
