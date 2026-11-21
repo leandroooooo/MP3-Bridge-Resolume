@@ -26,6 +26,10 @@ struct AEffect {
 };
 // VST2 ERect field order is top, left, bottom, right.
 struct ERect { int16_t top, left, bottom, right; };
+struct VstTimeInfo {
+    double samplePos, sampleRate, nanoSeconds, ppqPos, tempo, barStartPos, cycleStartPos, cycleEndPos;
+    VstInt32 timeSigNumerator, timeSigDenominator, smpteOffset, smpteFrameRate, samplesToNextClock, flags;
+};
 constexpr VstInt32 kEffectMagic = 0x56737450;
 constexpr VstInt32 effOpen = 0, effClose = 1;
 constexpr VstInt32 effGetParamLabel = 6, effGetParamDisplay = 7, effGetParamName = 8;
@@ -34,5 +38,7 @@ constexpr VstInt32 effSetSampleRate = 10, effSetBlockSize = 11, effMainsChanged 
 constexpr VstInt32 effEditGetRect = 13, effEditOpen = 14, effEditClose = 15;
 constexpr VstInt32 effGetEffectName = 45, effGetVendorString = 47, effGetProductString = 48;
 constexpr VstInt32 effGetVendorVersion = 49, effCanDo = 51, effGetVstVersion = 58;
-constexpr VstInt32 audioMasterVersion = 1;
+constexpr VstInt32 audioMasterVersion = 1, audioMasterGetTime = 7;
+constexpr VstInt32 kVstTransportPlaying = 1 << 1;
+constexpr VstInt32 effEditIdle = 19;
 constexpr VstInt32 effFlagsHasEditor = 1 << 0, effFlagsCanReplacing = 1 << 4;
