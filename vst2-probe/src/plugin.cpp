@@ -314,7 +314,7 @@ VstIntPtr VSTCALLBACK dispatch(AEffect* effect, VstInt32 opcode, VstInt32 index,
             return 1;
         }
         return 0;
-    case effEditOpen:
+    case effEditOpen: {
         if (!state || !ptr || !registerEditorClass()) return 0;
         state->hostParent = static_cast<HWND>(ptr);
         state->editor = CreateWindowExW(
@@ -348,6 +348,7 @@ VstIntPtr VSTCALLBACK dispatch(AEffect* effect, VstInt32 opcode, VstInt32 index,
         ShowWindow(state->editor, SW_SHOW);
         UpdateWindow(state->editor);
         return 1;
+    }
     case effEditClose:
         if (state && state->editor) { DestroyWindow(state->editor); state->editor = nullptr; state->fileLabel = nullptr; state->hostParent = nullptr; }
         return 1;
