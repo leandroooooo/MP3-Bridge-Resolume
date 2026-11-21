@@ -13,8 +13,25 @@ struct ProbeState {
     HWND editor = nullptr, fileLabel = nullptr, hostParent = nullptr;
     wchar_t selectedFile[MAX_PATH]{};
 };
+
+HINSTANCE pluginInstance() {
+    static HINSTANCE instance = [] {
+        HINSTANCE result = nullptr;
+        GetModuleHandleExW(
+            GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+            reinterpret_cast<LPCWSTR>(&pluginInstance), &result);
+        return result;
+    }();
+    return instance;
+}
+
 LRESULT CALLBACK editorProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam) {
     auto* state = reinterpret_cast<ProbeState*>(GetWindowLongPtrW(hwnd, GWLP_USERDATA));
+    if (message == WM_NCCREATE) {
+        const auto* create = reinterpret_cast<const CREATESTRUCTW*>(lParam);
+        state = static_cast<ProbeState*>(create->lpCreateParams);
+        SetWindowLongPtrW(hwnd, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(state));
+    }
     if (message == WM_COMMAND && LOWORD(wParam) == kOpenButtonId && state) {
         wchar_t path[MAX_PATH]{};
         OPENFILENAMEW dialog{};
@@ -35,17 +52,21 @@ LRESULT CALLBACK editorProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lPara
     if (message == WM_NCDESTROY) SetWindowLongPtrW(hwnd, GWLP_USERDATA, 0);
     return DefWindowProcW(hwnd, message, wParam, lParam);
 }
+
 bool registerEditorClass() {
     static bool registered = false;
     if (registered) return true;
     WNDCLASSEXW wc{};
-    wc.cbSize = sizeof(wc); wc.lpfnWndProc = editorProc;
-    wc.hInstance = GetModuleHandleW(nullptr); wc.hCursor = LoadCursorW(nullptr, MAKEINTRESOURCEW(32512));
+    wc.cbSize = sizeof(wc);
+    wc.lpfnWndProc = editorProc;
+    wc.hInstance = pluginInstance();
+    wc.hCursor = LoadCursorW(nullptr, MAKEINTRESOURCEW(32512));
     wc.hbrBackground = reinterpret_cast<HBRUSH>(COLOR_BTNFACE + 1);
     wc.lpszClassName = kWindowClass;
     registered = RegisterClassExW(&wc) != 0 || GetLastError() == ERROR_CLASS_ALREADY_EXISTS;
     return registered;
 }
+
 VstIntPtr VSTCALLBACK dispatch(AEffect* effect, VstInt32 opcode, VstInt32, VstIntPtr, void* ptr, float) {
     auto* state = effect ? static_cast<ProbeState*>(effect->object) : nullptr;
     switch (opcode) {
@@ -55,23 +76,30 @@ VstIntPtr VSTCALLBACK dispatch(AEffect* effect, VstInt32 opcode, VstInt32, VstIn
         delete state; return 1;
     case effSetSampleRate: case effSetBlockSize: case effMainsChanged: return 1;
     case effEditGetRect:
-        if (ptr) { static ERect rect{0, kEditorHeight, 0, kEditorWidth}; *static_cast<ERect**>(ptr) = &rect; return 1; }
+        if (ptr) {
+            static ERect rect{0, kEditorHeight, 0, kEditorWidth};
+            *static_cast<ERect**>(ptr) = &rect;
+            return 1;
+        }
         return 0;
     case effEditOpen:
         if (!state || !ptr || !registerEditorClass()) return 0;
         state->hostParent = static_cast<HWND>(ptr);
-        state->editor = CreateWindowExW(0, kWindowClass, L"MP3 Bridge Player",
-            WS_CHILD | WS_VISIBLE, 0, 0, kEditorWidth, kEditorHeight,
-            state->hostParent, nullptr, GetModuleHandleW(nullptr), nullptr);
+        state->editor = CreateWindowExW(
+            0, kWindowClass, L"MP3 Bridge Player",
+            WS_CHILD | WS_VISIBLE | WS_CLIPCHILDREN | WS_CLIPSIBLINGS,
+            0, 0, kEditorWidth, kEditorHeight,
+            state->hostParent, nullptr, pluginInstance(), state);
         if (!state->editor) return 0;
-        SetWindowLongPtrW(state->editor, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(state));
-        CreateWindowW(L"STATIC", L"MP3 Bridge Player - teste da interface",
-            WS_CHILD | WS_VISIBLE, 16, 14, 420, 24, state->editor, nullptr, GetModuleHandleW(nullptr), nullptr);
-        CreateWindowW(L"BUTTON", L"Abrir MP3",
+        CreateWindowExW(0, L"STATIC", L"MP3 Bridge Player - teste da interface",
+            WS_CHILD | WS_VISIBLE, 16, 14, 420, 24, state->editor, nullptr, pluginInstance(), nullptr);
+        CreateWindowExW(0, L"BUTTON", L"Abrir MP3",
             WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON, 16, 52, 120, 32, state->editor,
-            reinterpret_cast<HMENU>(static_cast<INT_PTR>(kOpenButtonId)), GetModuleHandleW(nullptr), nullptr);
-        state->fileLabel = CreateWindowW(L"STATIC", L"Nenhum arquivo selecionado",
-            WS_CHILD | WS_VISIBLE, 150, 58, 285, 24, state->editor, nullptr, GetModuleHandleW(nullptr), nullptr);
+            reinterpret_cast<HMENU>(static_cast<INT_PTR>(kOpenButtonId)), pluginInstance(), nullptr);
+        state->fileLabel = CreateWindowExW(0, L"STATIC", L"Nenhum arquivo selecionado",
+            WS_CHILD | WS_VISIBLE, 150, 58, 285, 24, state->editor, nullptr, pluginInstance(), nullptr);
+        ShowWindow(state->editor, SW_SHOW);
+        UpdateWindow(state->editor);
         return 1;
     case effEditClose:
         if (state && state->editor) { DestroyWindow(state->editor); state->editor = nullptr; state->fileLabel = nullptr; state->hostParent = nullptr; }
