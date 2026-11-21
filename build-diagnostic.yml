@@ -1,0 +1,36 @@
+
+name: Build MP3 diagnostic (Windows)
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - "diagnostic/**"
+      - ".github/workflows/build-diagnostic.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Compile MP3 decoder test
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Configure CMake
+        run: cmake -S diagnostic -B build -A x64
+
+      - name: Build Release
+        run: cmake --build build --config Release
+
+      - name: Upload executable
+        uses: actions/upload-artifact@v4
+        with:
+          name: MP3-Bridge-Resolume-diagnostic-windows-x64
+          path: build/Release/Mp3DecodeCheck.exe
+          if-no-files-found: error
