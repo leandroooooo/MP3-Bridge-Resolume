@@ -1,0 +1,4 @@
+LIBRARY "MP3BridgeVST2Probe"
+EXPORTS
+    VSTPluginMain
+    main
