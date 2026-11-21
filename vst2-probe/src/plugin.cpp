@@ -24,6 +24,24 @@ constexpr wchar_t kWindowClass[] = L"MP3BridgePlayerEditor";
 constexpr UINT32 kFallbackSampleRate = 48000;
 constexpr UINT32 kMaxPlaybackMinutes = 15;
 
+enum ParameterIndex : VstInt32 {
+    kParamPlay = 0,
+    kParamPause,
+    kParamStop,
+    kParamLoop,
+    kParameterCount
+};
+
+const char* parameterName(VstInt32 index) {
+    switch (index) {
+    case kParamPlay: return "Play";
+    case kParamPause: return "Pause";
+    case kParamStop: return "Stop";
+    case kParamLoop: return "Loop";
+    default: return "";
+    }
+}
+
 struct AudioBuffer {
     std::vector<float> stereo;
     UINT32 sampleRate = 0;
@@ -35,6 +53,10 @@ struct ProbeState {
     wchar_t selectedFile[MAX_PATH]{};
     std::shared_ptr<AudioBuffer> audio;
     std::atomic<uint64_t> playhead{0};
+    std::atomic<uint64_t> playbackGeneration{0};
+    std::atomic<float> parameters[kParameterCount]{};
+    std::atomic<bool> playing{false};
+    std::atomic<bool> loopEnabled{true};
     std::atomic<float> hostSampleRate{static_cast<float>(kFallbackSampleRate)};
 };
 
@@ -159,6 +181,49 @@ HRESULT decodeAudioFile(const wchar_t* path, UINT32 requestedRate, std::shared_p
     return S_OK;
 }
 
+void VSTCALLBACK setParameter(AEffect* effect, VstInt32 index, float value) {
+    auto* state = effect ? static_cast<ProbeState*>(effect->object) : nullptr;
+    if (!state || index < 0 || index >= kParameterCount) return;
+
+    const float normalized = std::isfinite(value) ? std::clamp(value, 0.0f, 1.0f) : 0.0f;
+    const float previous = state->parameters[index].exchange(normalized, std::memory_order_acq_rel);
+
+    if (index == kParamLoop) {
+        state->loopEnabled.store(normalized >= 0.5f, std::memory_order_release);
+        return;
+    }
+
+    // Play, Pause and Stop are momentary triggers: move the control back to 0
+    // before triggering the same command again.
+    if (normalized < 0.5f || previous >= 0.5f) return;
+
+    switch (index) {
+    case kParamPlay: {
+        const auto audio = std::atomic_load_explicit(&state->audio, std::memory_order_acquire);
+        if (audio && state->playhead.load(std::memory_order_relaxed) >= audio->stereo.size() / 2)
+            state->playhead.store(0, std::memory_order_relaxed);
+        state->playing.store(true, std::memory_order_release);
+        break;
+    }
+    case kParamPause:
+        state->playing.store(false, std::memory_order_release);
+        break;
+    case kParamStop:
+        state->playing.store(false, std::memory_order_release);
+        state->playbackGeneration.fetch_add(1, std::memory_order_acq_rel);
+        state->playhead.store(0, std::memory_order_release);
+        break;
+    default:
+        break;
+    }
+}
+
+float VSTCALLBACK getParameter(AEffect* effect, VstInt32 index) {
+    auto* state = effect ? static_cast<ProbeState*>(effect->object) : nullptr;
+    if (!state || index < 0 || index >= kParameterCount) return 0.0f;
+    return state->parameters[index].load(std::memory_order_acquire);
+}
+
 LRESULT CALLBACK editorProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam) {
     auto* state = reinterpret_cast<ProbeState*>(GetWindowLongPtrW(hwnd, GWLP_USERDATA));
     if (message == WM_NCCREATE) {
@@ -185,8 +250,13 @@ LRESULT CALLBACK editorProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lPara
             std::shared_ptr<AudioBuffer> decoded;
             const HRESULT hr = decodeAudioFile(path, requestedRate, decoded);
             if (SUCCEEDED(hr)) {
+                state->playbackGeneration.fetch_add(1, std::memory_order_acq_rel);
                 std::atomic_store_explicit(&state->audio, std::move(decoded), std::memory_order_release);
                 state->playhead.store(0, std::memory_order_relaxed);
+                state->parameters[kParamPlay].store(0.0f, std::memory_order_relaxed);
+                state->parameters[kParamPause].store(0.0f, std::memory_order_relaxed);
+                state->parameters[kParamStop].store(0.0f, std::memory_order_relaxed);
+                state->playing.store(true, std::memory_order_release);
                 lstrcpynW(state->selectedFile, path, MAX_PATH);
                 const wchar_t* name = wcsrchr(path, L'\\');
                 SetWindowTextW(state->fileLabel, name ? name + 1 : path);
@@ -258,6 +328,33 @@ VstIntPtr VSTCALLBACK dispatch(AEffect* effect, VstInt32 opcode, VstInt32, VstIn
     case effEditClose:
         if (state && state->editor) { DestroyWindow(state->editor); state->editor = nullptr; state->fileLabel = nullptr; state->hostParent = nullptr; }
         return 1;
+    case effGetParamName:
+        if (ptr && index >= 0 && index < kParameterCount) {
+            auto* text = static_cast<char*>(ptr);
+            std::strncpy(text, parameterName(index), 7);
+            text[7] = '\\0';
+            return 1;
+        }
+        return 0;
+    case effGetParamDisplay:
+        if (ptr && index >= 0 && index < kParameterCount) {
+            auto* text = static_cast<char*>(ptr);
+            const bool enabled = state && state->parameters[index].load(std::memory_order_acquire) >= 0.5f;
+            std::strncpy(text, index == kParamLoop ? (enabled ? "ON" : "OFF") : (enabled ? "TRIG" : "READY"), 7);
+            text[7] = '\\0';
+            return 1;
+        }
+        return 0;
+    case effGetParamLabel:
+        if (ptr && index >= 0 && index < kParameterCount) {
+            auto* text = static_cast<char*>(ptr);
+            std::strncpy(text, index == kParamLoop ? "ON/OFF" : "PULSE", 7);
+            text[7] = '\\0';
+            return 1;
+        }
+        return 0;
+    case effCanBeAutomated:
+        return (index >= 0 && index < kParameterCount) ? 1 : 0;
     case effGetEffectName:
         if (ptr) { std::strncpy(static_cast<char*>(ptr), "MP3 Bridge Player", 63); return 1; } return 0;
     case effGetProductString:
@@ -288,15 +385,52 @@ void VSTCALLBACK processReplacing(AEffect* effect, float** inputs, float** outpu
         return;
     }
 
-    const uint64_t totalFrames = audio->stereo.size() / 2;
-    const uint64_t start = state->playhead.fetch_add(static_cast<uint64_t>(frames), std::memory_order_relaxed);
-    for (int ch = 0; ch < 2; ++ch) {
-        if (!outputs[ch]) continue;
-        for (VstInt32 i = 0; i < frames; ++i) {
-            const uint64_t frame = (start + static_cast<uint64_t>(i)) % totalFrames;
-            outputs[ch][i] = audio->stereo[static_cast<size_t>(frame) * 2 + ch];
-        }
+    // This effect replaces the clip audio with the file loaded in MP3 Bridge.
+    // Once a file is loaded, a paused/stopped player outputs silence.
+    if (!state->playing.load(std::memory_order_acquire)) {
+        for (int ch = 0; ch < 2; ++ch)
+            if (outputs[ch]) std::fill(outputs[ch], outputs[ch] + frames, 0.0f);
+        return;
     }
+
+    const uint64_t totalFrames = audio->stereo.size() / 2;
+    const uint64_t generation = state->playbackGeneration.load(std::memory_order_acquire);
+    uint64_t cursor = state->playhead.load(std::memory_order_acquire);
+    const bool loop = state->loopEnabled.load(std::memory_order_acquire);
+
+    for (VstInt32 i = 0; i < frames; ++i) {
+        if (cursor >= totalFrames) {
+            if (loop) {
+                cursor = 0;
+            } else {
+                state->playing.store(false, std::memory_order_release);
+                break;
+            }
+        }
+        for (int ch = 0; ch < 2; ++ch) {
+            if (outputs[ch]) outputs[ch][i] = audio->stereo[static_cast<size_t>(cursor) * 2 + ch];
+        }
+        ++cursor;
+    }
+
+    // Any part of the block after the end of a non-looping file must be silent.
+    if (!loop && cursor >= totalFrames) {
+        for (int ch = 0; ch < 2; ++ch) {
+            if (outputs[ch]) {
+                const VstInt32 firstSilent = static_cast<VstInt32>(
+                    std::min<uint64_t>(frames, totalFrames > state->playhead.load()
+                        ? totalFrames - state->playhead.load() : 0));
+                if (firstSilent < frames)
+                    std::fill(outputs[ch] + firstSilent, outputs[ch] + frames, 0.0f);
+            }
+        }
+        state->playing.store(false, std::memory_order_release);
+    }
+
+    // A Stop or file reload during this block owns the new playhead position.
+    if (generation == state->playbackGeneration.load(std::memory_order_acquire))
+        state->playhead.store(loop ? (cursor % totalFrames) : std::min(cursor, totalFrames),
+                              std::memory_order_release);
 }
 }
 
@@ -304,9 +438,11 @@ extern "C" __declspec(dllexport) AEffect* VSTCALLBACK VSTPluginMain(audioMasterC
     if (!host || host(nullptr, audioMasterVersion, 0, 0, nullptr, 0.0f) == 0) return nullptr;
     auto* state = new (std::nothrow) ProbeState();
     if (!state) return nullptr;
+    state->loopEnabled.store(true, std::memory_order_relaxed);
+    state->parameters[kParamLoop].store(1.0f, std::memory_order_relaxed);
     auto& e = state->effect;
     e.magic = kEffectMagic; e.dispatcher = dispatch; e.process = nullptr;
-    e.setParameter = nullptr; e.getParameter = nullptr; e.numPrograms = 1; e.numParams = 0;
+    e.setParameter = setParameter; e.getParameter = getParameter; e.numPrograms = 1; e.numParams = kParameterCount;
     e.numInputs = 2; e.numOutputs = 2; e.flags = effFlagsCanReplacing | effFlagsHasEditor;
     e.initialDelay = 0; e.ioRatio = 1.0f; e.object = state; e.uniqueID = 0x4D503250;
     e.version = 1003; e.processReplacing = processReplacing; e.processDoubleReplacing = nullptr;
