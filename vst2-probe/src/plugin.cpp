@@ -4,6 +4,7 @@
 #include <mfapi.h>
 #include <mfidl.h>
 #include <mfreadwrite.h>
+#include <mferror.h>
 #include <wrl/client.h>
 #include <algorithm>
 #include <atomic>
