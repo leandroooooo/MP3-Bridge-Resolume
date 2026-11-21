@@ -1,5 +1,4 @@
 #include "aeffect_minimal.h"
-#define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 #include <commdlg.h>
 #include <algorithm>
@@ -41,7 +40,7 @@ bool registerEditorClass() {
     if (registered) return true;
     WNDCLASSEXW wc{};
     wc.cbSize = sizeof(wc); wc.lpfnWndProc = editorProc;
-    wc.hInstance = GetModuleHandleW(nullptr); wc.hCursor = LoadCursorW(nullptr, IDC_ARROW);
+    wc.hInstance = GetModuleHandleW(nullptr); wc.hCursor = LoadCursorW(nullptr, MAKEINTRESOURCEW(32512));
     wc.hbrBackground = reinterpret_cast<HBRUSH>(COLOR_BTNFACE + 1);
     wc.lpszClassName = kWindowClass;
     registered = RegisterClassExW(&wc) != 0 || GetLastError() == ERROR_CLASS_ALREADY_EXISTS;
