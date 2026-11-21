@@ -19,28 +19,10 @@
 
 namespace {
 using Microsoft::WRL::ComPtr;
-constexpr int kEditorWidth = 460, kEditorHeight = 150, kOpenButtonId = 1001;
+constexpr int kEditorWidth = 460, kEditorHeight = 150, kOpenButtonId = 1001, kPlayButtonId = 1002, kPauseButtonId = 1003, kStopButtonId = 1004, kLoopButtonId = 1005;
 constexpr wchar_t kWindowClass[] = L"MP3BridgePlayerEditor";
 constexpr UINT32 kFallbackSampleRate = 48000;
 constexpr UINT32 kMaxPlaybackMinutes = 15;
-
-enum ParameterIndex : VstInt32 {
-    kParamPlay = 0,
-    kParamPause,
-    kParamStop,
-    kParamLoop,
-    kParameterCount
-};
-
-const char* parameterName(VstInt32 index) {
-    switch (index) {
-    case kParamPlay: return "Play";
-    case kParamPause: return "Pause";
-    case kParamStop: return "Stop";
-    case kParamLoop: return "Loop";
-    default: return "";
-    }
-}
 
 struct AudioBuffer {
     std::vector<float> stereo;
@@ -49,13 +31,15 @@ struct AudioBuffer {
 
 struct ProbeState {
     AEffect effect{};
+    audioMasterCallback host = nullptr;
     HWND editor = nullptr, fileLabel = nullptr, hostParent = nullptr;
     wchar_t selectedFile[MAX_PATH]{};
     std::shared_ptr<AudioBuffer> audio;
     std::atomic<uint64_t> playhead{0};
     std::atomic<uint64_t> playbackGeneration{0};
-    std::atomic<float> parameters[kParameterCount]{};
     std::atomic<bool> playing{false};
+    std::atomic<bool> hostWasPlaying{false};
+    std::atomic<double> lastHostSamplePos{-1.0};
     std::atomic<bool> loopEnabled{true};
     std::atomic<float> hostSampleRate{static_cast<float>(kFallbackSampleRate)};
 };
@@ -181,47 +165,46 @@ HRESULT decodeAudioFile(const wchar_t* path, UINT32 requestedRate, std::shared_p
     return S_OK;
 }
 
-void VSTCALLBACK setParameter(AEffect* effect, VstInt32 index, float value) {
-    auto* state = effect ? static_cast<ProbeState*>(effect->object) : nullptr;
-    if (!state || index < 0 || index >= kParameterCount) return;
+void startPlayback(ProbeState* state, bool restartFromBeginning) {
+    if (!state) return;
+    const auto audio = std::atomic_load_explicit(&state->audio, std::memory_order_acquire);
+    if (!audio || audio->stereo.empty()) return;
+    if (restartFromBeginning || state->playhead.load(std::memory_order_relaxed) >= audio->stereo.size() / 2)
+        state->playhead.store(0, std::memory_order_release);
+    state->playing.store(true, std::memory_order_release);
+    state->playbackGeneration.fetch_add(1, std::memory_order_acq_rel);
+}
 
-    const float normalized = std::isfinite(value) ? std::clamp(value, 0.0f, 1.0f) : 0.0f;
-    const float previous = state->parameters[index].exchange(normalized, std::memory_order_acq_rel);
+void pausePlayback(ProbeState* state) {
+    if (state) state->playing.store(false, std::memory_order_release);
+}
 
-    if (index == kParamLoop) {
-        state->loopEnabled.store(normalized >= 0.5f, std::memory_order_release);
-        return;
-    }
+void stopPlayback(ProbeState* state) {
+    if (!state) return;
+    state->playing.store(false, std::memory_order_release);
+    state->playhead.store(0, std::memory_order_release);
+    state->playbackGeneration.fetch_add(1, std::memory_order_acq_rel);
+}
 
-    // Play, Pause and Stop are momentary triggers: move the control back to 0
-    // before triggering the same command again.
-    if (normalized < 0.5f || previous >= 0.5f) return;
-
-    switch (index) {
-    case kParamPlay: {
-        const auto audio = std::atomic_load_explicit(&state->audio, std::memory_order_acquire);
-        if (audio && state->playhead.load(std::memory_order_relaxed) >= audio->stereo.size() / 2)
-            state->playhead.store(0, std::memory_order_relaxed);
+void syncHostTransport(ProbeState* state) {
+    if (!state || !state->host) return;
+    const auto raw = state->host(&state->effect, audioMasterGetTime, 0,
+        kVstTransportPlaying, nullptr, 0.0f);
+    if (raw == 0) return;
+    const auto* timeInfo = reinterpret_cast<const VstTimeInfo*>(raw);
+    const bool hostPlaying = (timeInfo->flags & kVstTransportPlaying) != 0;
+    const double previousSamplePos = state->lastHostSamplePos.exchange(timeInfo->samplePos, std::memory_order_acq_rel);
+    const bool positionRestarted = previousSamplePos >= 0.0 && timeInfo->samplePos + 1.0 < previousSamplePos;
+    const bool wasPlaying = state->hostWasPlaying.exchange(hostPlaying, std::memory_order_acq_rel);
+    if (hostPlaying && (!wasPlaying || positionRestarted)) {
+        state->playhead.store(0, std::memory_order_release);
         state->playing.store(true, std::memory_order_release);
-        break;
-    }
-    case kParamPause:
-        state->playing.store(false, std::memory_order_release);
-        break;
-    case kParamStop:
+        state->playbackGeneration.fetch_add(1, std::memory_order_acq_rel);
+    } else if (!hostPlaying && wasPlaying) {
         state->playing.store(false, std::memory_order_release);
         state->playhead.store(0, std::memory_order_release);
         state->playbackGeneration.fetch_add(1, std::memory_order_acq_rel);
-        break;
-    default:
-        break;
     }
-}
-
-float VSTCALLBACK getParameter(AEffect* effect, VstInt32 index) {
-    auto* state = effect ? static_cast<ProbeState*>(effect->object) : nullptr;
-    if (!state || index < 0 || index >= kParameterCount) return 0.0f;
-    return state->parameters[index].load(std::memory_order_acquire);
 }
 
 LRESULT CALLBACK editorProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam) {
@@ -231,42 +214,58 @@ LRESULT CALLBACK editorProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lPara
         state = static_cast<ProbeState*>(create->lpCreateParams);
         SetWindowLongPtrW(hwnd, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(state));
     }
-    if (message == WM_COMMAND && LOWORD(wParam) == kOpenButtonId && state) {
-        wchar_t path[MAX_PATH]{};
-        OPENFILENAMEW dialog{};
-        dialog.lStructSize = sizeof(dialog);
-        dialog.hwndOwner = hwnd;
-        dialog.lpstrFilter = L"Áudio (*.mp3;*.wav)\0*.mp3;*.wav\0Todos (*.*)\0*.*\0";
-        dialog.lpstrFile = path;
-        dialog.nMaxFile = MAX_PATH;
-        dialog.Flags = OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST | OFN_HIDEREADONLY;
-        dialog.lpstrTitle = L"Selecionar áudio";
-        if (GetOpenFileNameW(&dialog)) {
-            SetWindowTextW(state->fileLabel, L"Carregando áudio...");
-            UpdateWindow(hwnd);
-            const float hostRate = state->hostSampleRate.load(std::memory_order_relaxed);
-            const auto requestedRate = hostRate >= 8000.0f && hostRate <= 192000.0f
-                ? static_cast<UINT32>(std::lround(hostRate)) : kFallbackSampleRate;
-            std::shared_ptr<AudioBuffer> decoded;
-            const HRESULT hr = decodeAudioFile(path, requestedRate, decoded);
-            if (SUCCEEDED(hr)) {
-                std::atomic_store_explicit(&state->audio, std::move(decoded), std::memory_order_release);
-                state->playhead.store(0, std::memory_order_relaxed);
-                state->parameters[kParamPlay].store(0.0f, std::memory_order_relaxed);
-                state->parameters[kParamPause].store(0.0f, std::memory_order_relaxed);
-                state->parameters[kParamStop].store(0.0f, std::memory_order_relaxed);
-                state->playing.store(true, std::memory_order_release);
-                state->playbackGeneration.fetch_add(1, std::memory_order_acq_rel);
-                lstrcpynW(state->selectedFile, path, MAX_PATH);
-                const wchar_t* name = wcsrchr(path, L'\\');
-                SetWindowTextW(state->fileLabel, name ? name + 1 : path);
-            } else {
-                const std::wstring error = L"Falha ao abrir áudio: " + describeError(hr);
-                SetWindowTextW(state->fileLabel, L"Falha ao carregar o áudio");
-                MessageBoxW(hwnd, error.c_str(), L"MP3 Bridge", MB_OK | MB_ICONERROR);
+    if (message == WM_COMMAND && state) {
+        switch (LOWORD(wParam)) {
+        case kOpenButtonId: {
+            wchar_t path[MAX_PATH]{};
+            OPENFILENAMEW dialog{};
+            dialog.lStructSize = sizeof(dialog);
+            dialog.hwndOwner = hwnd;
+            dialog.lpstrFilter = L"Áudio (*.mp3;*.wav)\0*.mp3;*.wav\0Todos (*.*)\0*.*\0";
+            dialog.lpstrFile = path;
+            dialog.nMaxFile = MAX_PATH;
+            dialog.Flags = OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST | OFN_HIDEREADONLY;
+            dialog.lpstrTitle = L"Selecionar áudio";
+            if (GetOpenFileNameW(&dialog)) {
+                SetWindowTextW(state->fileLabel, L"Carregando áudio...");
+                UpdateWindow(hwnd);
+                const float hostRate = state->hostSampleRate.load(std::memory_order_relaxed);
+                const auto requestedRate = hostRate >= 8000.0f && hostRate <= 192000.0f
+                    ? static_cast<UINT32>(std::lround(hostRate)) : kFallbackSampleRate;
+                std::shared_ptr<AudioBuffer> decoded;
+                const HRESULT hr = decodeAudioFile(path, requestedRate, decoded);
+                if (SUCCEEDED(hr)) {
+                    std::atomic_store_explicit(&state->audio, std::move(decoded), std::memory_order_release);
+                    state->playhead.store(0, std::memory_order_release);
+                    state->playing.store(true, std::memory_order_release);
+                    state->playbackGeneration.fetch_add(1, std::memory_order_acq_rel);
+                    lstrcpynW(state->selectedFile, path, MAX_PATH);
+                    const wchar_t* name = wcsrchr(path, L'\\');
+                    SetWindowTextW(state->fileLabel, name ? name + 1 : path);
+                } else {
+                    const std::wstring error = L"Falha ao abrir áudio: " + describeError(hr);
+                    SetWindowTextW(state->fileLabel, L"Falha ao carregar o áudio");
+                    MessageBoxW(hwnd, error.c_str(), L"MP3 Bridge", MB_OK | MB_ICONERROR);
+                }
             }
+            return 0;
         }
-        return 0;
+        case kPlayButtonId:
+            startPlayback(state, true);
+            return 0;
+        case kPauseButtonId:
+            pausePlayback(state);
+            return 0;
+        case kStopButtonId:
+            stopPlayback(state);
+            return 0;
+        case kLoopButtonId:
+            state->loopEnabled.store(IsDlgButtonChecked(hwnd, kLoopButtonId) == BST_CHECKED,
+                                     std::memory_order_release);
+            return 0;
+        default:
+            break;
+        }
     }
     if (message == WM_NCDESTROY) SetWindowLongPtrW(hwnd, GWLP_USERDATA, 0);
     return DefWindowProcW(hwnd, message, wParam, lParam);
@@ -286,7 +285,7 @@ bool registerEditorClass() {
     return registered;
 }
 
-VstIntPtr VSTCALLBACK dispatch(AEffect* effect, VstInt32 opcode, VstInt32 index, VstIntPtr, void* ptr, float opt) {
+VstIntPtr VSTCALLBACK dispatch(AEffect* effect, VstInt32 opcode, VstInt32 index, VstIntPtr value, void* ptr, float opt) {
     auto* state = effect ? static_cast<ProbeState*>(effect->object) : nullptr;
     switch (opcode) {
     case effOpen: return 1;
@@ -297,7 +296,17 @@ VstIntPtr VSTCALLBACK dispatch(AEffect* effect, VstInt32 opcode, VstInt32 index,
         if (state && opt >= 8000.0f && opt <= 192000.0f)
             state->hostSampleRate.store(opt, std::memory_order_relaxed);
         return 1;
-    case effSetBlockSize: case effMainsChanged: return 1;
+    case effSetBlockSize: return 1;
+    case effMainsChanged:
+        if (state && value == 0) {
+            state->hostWasPlaying.store(false, std::memory_order_release);
+            state->lastHostSamplePos.store(-1.0, std::memory_order_release);
+            stopPlayback(state);
+        }
+        return 1;
+    case effEditIdle:
+        syncHostTransport(state);
+        return 1;
     case effEditGetRect:
         if (ptr) {
             static ERect rect{0, 0, kEditorHeight, kEditorWidth};
@@ -322,39 +331,26 @@ VstIntPtr VSTCALLBACK dispatch(AEffect* effect, VstInt32 opcode, VstInt32 index,
         state->fileLabel = CreateWindowExW(0, L"STATIC",
             state->selectedFile[0] ? state->selectedFile : L"Nenhum arquivo selecionado",
             WS_CHILD | WS_VISIBLE, 150, 58, 285, 24, state->editor, nullptr, pluginInstance(), nullptr);
+        CreateWindowExW(0, L"BUTTON", L"Play",
+            WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON, 16, 98, 78, 28, state->editor,
+            reinterpret_cast<HMENU>(static_cast<INT_PTR>(kPlayButtonId)), pluginInstance(), nullptr);
+        CreateWindowExW(0, L"BUTTON", L"Pause",
+            WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON, 102, 98, 78, 28, state->editor,
+            reinterpret_cast<HMENU>(static_cast<INT_PTR>(kPauseButtonId)), pluginInstance(), nullptr);
+        CreateWindowExW(0, L"BUTTON", L"Stop",
+            WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON, 188, 98, 78, 28, state->editor,
+            reinterpret_cast<HMENU>(static_cast<INT_PTR>(kStopButtonId)), pluginInstance(), nullptr);
+        HWND loopButton = CreateWindowExW(0, L"BUTTON", L"Loop",
+            WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX | BS_PUSHLIKE, 274, 98, 100, 28, state->editor,
+            reinterpret_cast<HMENU>(static_cast<INT_PTR>(kLoopButtonId)), pluginInstance(), nullptr);
+        if (loopButton && state->loopEnabled.load(std::memory_order_acquire))
+            SendMessageW(loopButton, BM_SETCHECK, BST_CHECKED, 0);
         ShowWindow(state->editor, SW_SHOW);
         UpdateWindow(state->editor);
         return 1;
     case effEditClose:
         if (state && state->editor) { DestroyWindow(state->editor); state->editor = nullptr; state->fileLabel = nullptr; state->hostParent = nullptr; }
         return 1;
-    case effGetParamName:
-        if (ptr && index >= 0 && index < kParameterCount) {
-            auto* text = static_cast<char*>(ptr);
-            std::strncpy(text, parameterName(index), 7);
-            text[7] = '\0';
-            return 1;
-        }
-        return 0;
-    case effGetParamDisplay:
-        if (ptr && index >= 0 && index < kParameterCount) {
-            auto* text = static_cast<char*>(ptr);
-            const bool enabled = state && state->parameters[index].load(std::memory_order_acquire) >= 0.5f;
-            std::strncpy(text, index == kParamLoop ? (enabled ? "ON" : "OFF") : (enabled ? "TRIG" : "READY"), 7);
-            text[7] = '\0';
-            return 1;
-        }
-        return 0;
-    case effGetParamLabel:
-        if (ptr && index >= 0 && index < kParameterCount) {
-            auto* text = static_cast<char*>(ptr);
-            std::strncpy(text, index == kParamLoop ? "ON/OFF" : "PULSE", 7);
-            text[7] = '\0';
-            return 1;
-        }
-        return 0;
-    case effCanBeAutomated:
-        return (index >= 0 && index < kParameterCount) ? 1 : 0;
     case effGetEffectName:
         if (ptr) { std::strncpy(static_cast<char*>(ptr), "MP3 Bridge Player", 63); return 1; } return 0;
     case effGetProductString:
@@ -374,6 +370,7 @@ VstIntPtr VSTCALLBACK dispatch(AEffect* effect, VstInt32 opcode, VstInt32 index,
 void VSTCALLBACK processReplacing(AEffect* effect, float** inputs, float** outputs, VstInt32 frames) {
     if (!outputs || frames <= 0) return;
     auto* state = effect ? static_cast<ProbeState*>(effect->object) : nullptr;
+    syncHostTransport(state);
     const auto audio = state ? std::atomic_load_explicit(&state->audio, std::memory_order_acquire) : nullptr;
     if (!audio || audio->stereo.empty()) {
         for (int ch = 0; ch < 2; ++ch) {
@@ -423,13 +420,11 @@ extern "C" __declspec(dllexport) AEffect* VSTCALLBACK VSTPluginMain(audioMasterC
     if (!host || host(nullptr, audioMasterVersion, 0, 0, nullptr, 0.0f) == 0) return nullptr;
     auto* state = new (std::nothrow) ProbeState();
     if (!state) return nullptr;
-    for (VstInt32 i = 0; i < kParameterCount; ++i)
-        state->parameters[i].store(0.0f, std::memory_order_relaxed);
+    state->host = host;
     state->loopEnabled.store(true, std::memory_order_relaxed);
-    state->parameters[kParamLoop].store(1.0f, std::memory_order_relaxed);
     auto& e = state->effect;
     e.magic = kEffectMagic; e.dispatcher = dispatch; e.process = nullptr;
-    e.setParameter = setParameter; e.getParameter = getParameter; e.numPrograms = 1; e.numParams = kParameterCount;
+    e.setParameter = nullptr; e.getParameter = nullptr; e.numPrograms = 1; e.numParams = 0;
     e.numInputs = 2; e.numOutputs = 2; e.flags = effFlagsCanReplacing | effFlagsHasEditor;
     e.initialDelay = 0; e.ioRatio = 1.0f; e.object = state; e.uniqueID = 0x4D503250;
     e.version = 1003; e.processReplacing = processReplacing; e.processDoubleReplacing = nullptr;
