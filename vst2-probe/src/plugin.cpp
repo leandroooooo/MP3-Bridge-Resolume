@@ -19,7 +19,9 @@
 
 namespace {
 using Microsoft::WRL::ComPtr;
-constexpr int kEditorWidth = 460, kEditorHeight = 150, kOpenButtonId = 1001, kPlayButtonId = 1002, kPauseButtonId = 1003, kStopButtonId = 1004, kLoopButtonId = 1005;
+constexpr int kEditorWidth = 460, kEditorHeight = 220, kOpenButtonId = 1001, kPlayButtonId = 1002, kPauseButtonId = 1003, kStopButtonId = 1004, kLoopButtonId = 1005;
+constexpr UINT_PTR kUiTimerId = 1;
+constexpr int kSpectrumBands = 8;
 constexpr wchar_t kWindowClass[] = L"MP3BridgePlayerEditor";
 constexpr UINT32 kFallbackSampleRate = 48000;
 constexpr UINT32 kMaxPlaybackMinutes = 15;
@@ -32,7 +34,8 @@ struct AudioBuffer {
 struct ProbeState {
     AEffect effect{};
     audioMasterCallback host = nullptr;
-    HWND editor = nullptr, fileLabel = nullptr, hostParent = nullptr;
+    HWND editor = nullptr, fileLabel = nullptr, timeLabel = nullptr, hostParent = nullptr;
+    std::atomic<float> spectrum[kSpectrumBands]{};
     wchar_t selectedFile[MAX_PATH]{};
     std::shared_ptr<AudioBuffer> audio;
     std::atomic<uint64_t> playhead{0};
@@ -204,12 +207,87 @@ void syncHostTransport(ProbeState* state) {
     }
 }
 
+void updateTimeLabel(ProbeState* state) {
+    if (!state || !state->timeLabel) return;
+    const auto audio = std::atomic_load_explicit(&state->audio, std::memory_order_acquire);
+    if (!audio || audio->stereo.empty() || audio->sampleRate == 0) {
+        SetWindowTextW(state->timeLabel, L"Decorrido 00:00 / 00:00    Restante 00:00");
+    } else {
+        const uint64_t totalFrames = audio->stereo.size() / 2;
+        const uint64_t currentFrames = std::min(state->playhead.load(std::memory_order_acquire), totalFrames);
+        const uint64_t elapsed = currentFrames / audio->sampleRate;
+        const uint64_t total = totalFrames / audio->sampleRate;
+        const uint64_t remaining = total - std::min(elapsed, total);
+        wchar_t text[128]{};
+        swprintf_s(text, _countof(text), L"Decorrido %02llu:%02llu / %02llu:%02llu    Restante %02llu:%02llu",
+            static_cast<unsigned long long>(elapsed / 60), static_cast<unsigned long long>(elapsed % 60),
+            static_cast<unsigned long long>(total / 60), static_cast<unsigned long long>(total % 60),
+            static_cast<unsigned long long>(remaining / 60), static_cast<unsigned long long>(remaining % 60));
+        SetWindowTextW(state->timeLabel, text);
+    }
+    if (!state->playing.load(std::memory_order_acquire)) {
+        for (int i = 0; i < kSpectrumBands; ++i) {
+            const float old = state->spectrum[i].load(std::memory_order_relaxed);
+            state->spectrum[i].store(old * 0.72f, std::memory_order_relaxed);
+        }
+    }
+}
+
+void paintVisualizer(HDC dc, ProbeState* state) {
+    const auto audio = state ? std::atomic_load_explicit(&state->audio, std::memory_order_acquire) : nullptr;
+    RECT progressBg{16, 117, 444, 125};
+    RECT spectrumBg{16, 132, 444, 174};
+    HBRUSH dark = CreateSolidBrush(RGB(24, 31, 43));
+    HBRUSH track = CreateSolidBrush(RGB(44, 55, 68));
+    FillRect(dc, &progressBg, track);
+    FillRect(dc, &spectrumBg, dark);
+
+    if (audio && !audio->stereo.empty()) {
+        const uint64_t totalFrames = audio->stereo.size() / 2;
+        const uint64_t currentFrames = std::min(state->playhead.load(std::memory_order_acquire), totalFrames);
+        const int width = static_cast<int>((currentFrames * 428ull) / totalFrames);
+        if (width > 0) {
+            RECT progress{16, 117, 16 + width, 125};
+            HBRUSH progressBrush = CreateSolidBrush(RGB(105, 238, 176));
+            FillRect(dc, &progress, progressBrush);
+            DeleteObject(progressBrush);
+        }
+        const COLORREF colors[kSpectrumBands] = {
+            RGB(75, 220, 172), RGB(86, 229, 154), RGB(139, 235, 110), RGB(196, 235, 84),
+            RGB(237, 215, 79), RGB(247, 171, 83), RGB(239, 123, 112), RGB(206, 119, 237)
+        };
+        for (int i = 0; i < kSpectrumBands; ++i) {
+            const float level = std::clamp(state->spectrum[i].load(std::memory_order_acquire), 0.0f, 1.0f);
+            const int height = std::max(2, static_cast<int>(level * 38.0f));
+            const int left = 19 + i * 53;
+            RECT bar{left, 171 - height, left + 42, 171};
+            HBRUSH barBrush = CreateSolidBrush(colors[i]);
+            FillRect(dc, &bar, barBrush);
+            DeleteObject(barBrush);
+        }
+    }
+    DeleteObject(dark);
+    DeleteObject(track);
+}
+
 LRESULT CALLBACK editorProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam) {
     auto* state = reinterpret_cast<ProbeState*>(GetWindowLongPtrW(hwnd, GWLP_USERDATA));
     if (message == WM_NCCREATE) {
         const auto* create = reinterpret_cast<const CREATESTRUCTW*>(lParam);
         state = static_cast<ProbeState*>(create->lpCreateParams);
         SetWindowLongPtrW(hwnd, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(state));
+    }
+    if (message == WM_TIMER && wParam == kUiTimerId) {
+        updateTimeLabel(state);
+        InvalidateRect(hwnd, nullptr, FALSE);
+        return 0;
+    }
+    if (message == WM_PAINT) {
+        PAINTSTRUCT paint{};
+        HDC dc = BeginPaint(hwnd, &paint);
+        paintVisualizer(dc, state);
+        EndPaint(hwnd, &paint);
+        return 0;
     }
     if (message == WM_COMMAND && state) {
         switch (LOWORD(wParam)) {
@@ -239,6 +317,8 @@ LRESULT CALLBACK editorProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lPara
                     lstrcpynW(state->selectedFile, path, MAX_PATH);
                     const wchar_t* name = wcsrchr(path, L'\\');
                     SetWindowTextW(state->fileLabel, name ? name + 1 : path);
+                    updateTimeLabel(state);
+                    InvalidateRect(hwnd, nullptr, FALSE);
                 } else {
                     const std::wstring error = L"Falha ao abrir áudio: " + describeError(hr);
                     SetWindowTextW(state->fileLabel, L"Falha ao carregar o áudio");
@@ -264,7 +344,10 @@ LRESULT CALLBACK editorProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lPara
             break;
         }
     }
-    if (message == WM_NCDESTROY) SetWindowLongPtrW(hwnd, GWLP_USERDATA, 0);
+    if (message == WM_NCDESTROY) {
+        KillTimer(hwnd, kUiTimerId);
+        SetWindowLongPtrW(hwnd, GWLP_USERDATA, 0);
+    }
     return DefWindowProcW(hwnd, message, wParam, lParam);
 }
 
@@ -319,31 +402,35 @@ VstIntPtr VSTCALLBACK dispatch(AEffect* effect, VstInt32 opcode, VstInt32 index,
         CreateWindowExW(0, L"STATIC", L"MP3 Bridge Player",
             WS_CHILD | WS_VISIBLE, 16, 14, 420, 24, state->editor, nullptr, pluginInstance(), nullptr);
         CreateWindowExW(0, L"BUTTON", L"Abrir MP3",
-            WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON, 16, 52, 120, 32, state->editor,
+            WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON, 16, 48, 120, 32, state->editor,
             reinterpret_cast<HMENU>(static_cast<INT_PTR>(kOpenButtonId)), pluginInstance(), nullptr);
         state->fileLabel = CreateWindowExW(0, L"STATIC",
             state->selectedFile[0] ? state->selectedFile : L"Nenhum arquivo selecionado",
-            WS_CHILD | WS_VISIBLE, 150, 58, 285, 24, state->editor, nullptr, pluginInstance(), nullptr);
+            WS_CHILD | WS_VISIBLE, 150, 54, 285, 24, state->editor, nullptr, pluginInstance(), nullptr);
+        state->timeLabel = CreateWindowExW(0, L"STATIC", L"Decorrido 00:00 / 00:00    Restante 00:00",
+            WS_CHILD | WS_VISIBLE, 16, 88, 428, 20, state->editor, nullptr, pluginInstance(), nullptr);
         CreateWindowExW(0, L"BUTTON", L"Play",
-            WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON, 16, 98, 78, 28, state->editor,
+            WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON, 16, 180, 78, 28, state->editor,
             reinterpret_cast<HMENU>(static_cast<INT_PTR>(kPlayButtonId)), pluginInstance(), nullptr);
         CreateWindowExW(0, L"BUTTON", L"Pause",
-            WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON, 102, 98, 78, 28, state->editor,
+            WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON, 102, 180, 78, 28, state->editor,
             reinterpret_cast<HMENU>(static_cast<INT_PTR>(kPauseButtonId)), pluginInstance(), nullptr);
         CreateWindowExW(0, L"BUTTON", L"Stop",
-            WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON, 188, 98, 78, 28, state->editor,
+            WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON, 188, 180, 78, 28, state->editor,
             reinterpret_cast<HMENU>(static_cast<INT_PTR>(kStopButtonId)), pluginInstance(), nullptr);
         HWND loopButton = CreateWindowExW(0, L"BUTTON", L"Loop",
-            WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX | BS_PUSHLIKE, 274, 98, 100, 28, state->editor,
+            WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX | BS_PUSHLIKE, 274, 180, 100, 28, state->editor,
             reinterpret_cast<HMENU>(static_cast<INT_PTR>(kLoopButtonId)), pluginInstance(), nullptr);
         if (loopButton && state->loopEnabled.load(std::memory_order_acquire))
             SendMessageW(loopButton, BM_SETCHECK, BST_CHECKED, 0);
+        SetTimer(state->editor, kUiTimerId, 120, nullptr);
+        updateTimeLabel(state);
         ShowWindow(state->editor, SW_SHOW);
         UpdateWindow(state->editor);
         return 1;
     }
     case effEditClose:
-        if (state && state->editor) { DestroyWindow(state->editor); state->editor = nullptr; state->fileLabel = nullptr; state->hostParent = nullptr; }
+        if (state && state->editor) { DestroyWindow(state->editor); state->editor = nullptr; state->fileLabel = nullptr; state->timeLabel = nullptr; state->hostParent = nullptr; }
         return 1;
     case effGetEffectName:
         if (ptr) { std::strncpy(static_cast<char*>(ptr), "MP3 Bridge Player", 63); return 1; } return 0;
@@ -387,17 +474,36 @@ void VSTCALLBACK processReplacing(AEffect* effect, float** inputs, float** outpu
     const uint64_t generation = state->playbackGeneration.load(std::memory_order_acquire);
     uint64_t cursor = state->playhead.load(std::memory_order_acquire);
     const bool loop = state->loopEnabled.load(std::memory_order_acquire);
+    constexpr double frequencies[kSpectrumBands] = {63.0, 125.0, 250.0, 500.0, 1000.0, 2000.0, 4000.0, 8000.0};
+    double coeff[kSpectrumBands]{}, q1[kSpectrumBands]{}, q2[kSpectrumBands]{};
+    const double sampleRate = static_cast<double>(audio->sampleRate ? audio->sampleRate : kFallbackSampleRate);
+    for (int band = 0; band < kSpectrumBands; ++band) {
+        const double frequency = std::min(frequencies[band], sampleRate * 0.45);
+        coeff[band] = 2.0 * std::cos(6.283185307179586 * frequency / sampleRate);
+    }
 
     for (VstInt32 i = 0; i < frames; ++i) {
         if (cursor >= totalFrames) {
             if (loop) cursor = 0;
             else break;
         }
-        for (int ch = 0; ch < 2; ++ch) {
-            if (outputs[ch])
-                outputs[ch][i] = audio->stereo[static_cast<size_t>(cursor) * 2 + ch];
+        const float left = audio->stereo[static_cast<size_t>(cursor) * 2];
+        const float right = audio->stereo[static_cast<size_t>(cursor) * 2 + 1];
+        if (outputs[0]) outputs[0][i] = left;
+        if (outputs[1]) outputs[1][i] = right;
+        const double mono = (static_cast<double>(left) + right) * 0.5;
+        for (int band = 0; band < kSpectrumBands; ++band) {
+            const double q0 = mono + coeff[band] * q1[band] - q2[band];
+            q2[band] = q1[band];
+            q1[band] = q0;
         }
         ++cursor;
+    }
+    for (int band = 0; band < kSpectrumBands; ++band) {
+        const double power = std::max(0.0, q1[band] * q1[band] + q2[band] * q2[band] - coeff[band] * q1[band] * q2[band]);
+        const float level = std::clamp(static_cast<float>(std::sqrt(power) * 2.0 / frames), 0.0f, 1.0f);
+        const float previous = state->spectrum[band].load(std::memory_order_relaxed);
+        state->spectrum[band].store(previous * 0.58f + level * 0.42f, std::memory_order_relaxed);
     }
 
     if (!loop && cursor >= totalFrames)
