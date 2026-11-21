@@ -300,9 +300,6 @@ VstIntPtr VSTCALLBACK dispatch(AEffect* effect, VstInt32 opcode, VstInt32 index,
             stopPlayback(state);
         }
         return 1;
-    case effEditIdle:
-        syncHostTransport(state);
-        return 1;
     case effEditGetRect:
         if (ptr) {
             static ERect rect{0, 0, kEditorHeight, kEditorWidth};
