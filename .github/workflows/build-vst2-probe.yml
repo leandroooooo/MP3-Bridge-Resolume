@@ -1,0 +1,35 @@
+name: Build VST2 probe (Windows x64)
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+    paths:
+      - "vst2-probe/**"
+      - ".github/workflows/build-vst2-probe.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build minimal VST2 probe
+    runs-on: windows-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Configure
+        run: cmake -S vst2-probe -B build -A x64
+
+      - name: Build
+        run: cmake --build build --config Release
+
+      - name: Upload VST2 DLL
+        uses: actions/upload-artifact@v4
+        with:
+          name: MP3-Bridge-VST2-Probe-Windows-x64
+          path: build/Release/MP3BridgeVST2Probe.dll
+          if-no-files-found: error
+          retention-days: 14
