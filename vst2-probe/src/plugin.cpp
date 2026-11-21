@@ -423,6 +423,8 @@ extern "C" __declspec(dllexport) AEffect* VSTCALLBACK VSTPluginMain(audioMasterC
     if (!host || host(nullptr, audioMasterVersion, 0, 0, nullptr, 0.0f) == 0) return nullptr;
     auto* state = new (std::nothrow) ProbeState();
     if (!state) return nullptr;
+    for (VstInt32 i = 0; i < kParameterCount; ++i)
+        state->parameters[i].store(0.0f, std::memory_order_relaxed);
     state->loopEnabled.store(true, std::memory_order_relaxed);
     state->parameters[kParamLoop].store(1.0f, std::memory_order_relaxed);
     auto& e = state->effect;
