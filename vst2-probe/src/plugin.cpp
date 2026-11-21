@@ -286,7 +286,7 @@ bool registerEditorClass() {
     return registered;
 }
 
-VstIntPtr VSTCALLBACK dispatch(AEffect* effect, VstInt32 opcode, VstInt32, VstIntPtr, void* ptr, float opt) {
+VstIntPtr VSTCALLBACK dispatch(AEffect* effect, VstInt32 opcode, VstInt32 index, VstIntPtr, void* ptr, float opt) {
     auto* state = effect ? static_cast<ProbeState*>(effect->object) : nullptr;
     switch (opcode) {
     case effOpen: return 1;
@@ -332,7 +332,7 @@ VstIntPtr VSTCALLBACK dispatch(AEffect* effect, VstInt32 opcode, VstInt32, VstIn
         if (ptr && index >= 0 && index < kParameterCount) {
             auto* text = static_cast<char*>(ptr);
             std::strncpy(text, parameterName(index), 7);
-            text[7] = '\\0';
+            text[7] = '\0';
             return 1;
         }
         return 0;
@@ -341,7 +341,7 @@ VstIntPtr VSTCALLBACK dispatch(AEffect* effect, VstInt32 opcode, VstInt32, VstIn
             auto* text = static_cast<char*>(ptr);
             const bool enabled = state && state->parameters[index].load(std::memory_order_acquire) >= 0.5f;
             std::strncpy(text, index == kParamLoop ? (enabled ? "ON" : "OFF") : (enabled ? "TRIG" : "READY"), 7);
-            text[7] = '\\0';
+            text[7] = '\0';
             return 1;
         }
         return 0;
@@ -349,7 +349,7 @@ VstIntPtr VSTCALLBACK dispatch(AEffect* effect, VstInt32 opcode, VstInt32, VstIn
         if (ptr && index >= 0 && index < kParameterCount) {
             auto* text = static_cast<char*>(ptr);
             std::strncpy(text, index == kParamLoop ? "ON/OFF" : "PULSE", 7);
-            text[7] = '\\0';
+            text[7] = '\0';
             return 1;
         }
         return 0;
@@ -385,13 +385,12 @@ void VSTCALLBACK processReplacing(AEffect* effect, float** inputs, float** outpu
         return;
     }
 
-    // This effect replaces the clip audio with the file loaded in MP3 Bridge.
-    // Once a file is loaded, a paused/stopped player outputs silence.
-    if (!state->playing.load(std::memory_order_acquire)) {
-        for (int ch = 0; ch < 2; ++ch)
-            if (outputs[ch]) std::fill(outputs[ch], outputs[ch] + frames, 0.0f);
-        return;
-    }
+    // The file selected in MP3 Bridge replaces the clip audio.
+    // Silence is emitted while this player is paused or stopped.
+    for (int ch = 0; ch < 2; ++ch)
+        if (outputs[ch]) std::fill(outputs[ch], outputs[ch] + frames, 0.0f);
+
+    if (!state->playing.load(std::memory_order_acquire)) return;
 
     const uint64_t totalFrames = audio->stereo.size() / 2;
     const uint64_t generation = state->playbackGeneration.load(std::memory_order_acquire);
@@ -400,32 +399,18 @@ void VSTCALLBACK processReplacing(AEffect* effect, float** inputs, float** outpu
 
     for (VstInt32 i = 0; i < frames; ++i) {
         if (cursor >= totalFrames) {
-            if (loop) {
-                cursor = 0;
-            } else {
-                state->playing.store(false, std::memory_order_release);
-                break;
-            }
+            if (loop) cursor = 0;
+            else break;
         }
         for (int ch = 0; ch < 2; ++ch) {
-            if (outputs[ch]) outputs[ch][i] = audio->stereo[static_cast<size_t>(cursor) * 2 + ch];
+            if (outputs[ch])
+                outputs[ch][i] = audio->stereo[static_cast<size_t>(cursor) * 2 + ch];
         }
         ++cursor;
     }
 
-    // Any part of the block after the end of a non-looping file must be silent.
-    if (!loop && cursor >= totalFrames) {
-        for (int ch = 0; ch < 2; ++ch) {
-            if (outputs[ch]) {
-                const VstInt32 firstSilent = static_cast<VstInt32>(
-                    std::min<uint64_t>(frames, totalFrames > state->playhead.load()
-                        ? totalFrames - state->playhead.load() : 0));
-                if (firstSilent < frames)
-                    std::fill(outputs[ch] + firstSilent, outputs[ch] + frames, 0.0f);
-            }
-        }
+    if (!loop && cursor >= totalFrames)
         state->playing.store(false, std::memory_order_release);
-    }
 
     // A Stop or file reload during this block owns the new playhead position.
     if (generation == state->playbackGeneration.load(std::memory_order_acquire))
