@@ -98,7 +98,3 @@ extern "C" __declspec(dllexport) AEffect* VSTCALLBACK VSTPluginMain(audioMasterC
     e.processDoubleReplacing = nullptr;
     return &e;
 }
-
-extern "C" __declspec(dllexport) AEffect* VSTCALLBACK main(audioMasterCallback host) {
-    return VSTPluginMain(host);
-}
