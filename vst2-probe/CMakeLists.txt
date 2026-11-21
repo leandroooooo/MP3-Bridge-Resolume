@@ -1,0 +1,15 @@
+cmake_minimum_required(VERSION 3.20)
+project(MP3BridgeVST2Probe LANGUAGES CXX)
+
+add_library(MP3BridgeVST2Probe SHARED
+    src/plugin.cpp
+    src/MP3BridgeVST2Probe.def
+)
+
+target_compile_features(MP3BridgeVST2Probe PRIVATE cxx_std_17)
+target_compile_definitions(MP3BridgeVST2Probe PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX)
+set_target_properties(MP3BridgeVST2Probe PROPERTIES
+    OUTPUT_NAME "MP3BridgeVST2Probe"
+    PREFIX ""
+    SUFFIX ".dll"
+)
